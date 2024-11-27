@@ -1,0 +1,287 @@
+```{r}
+#clear global environment
+rm(list=ls())
+```
+
+
+
+
+```{r}
+# Simulate data to create known ground truth
+#set seed for consistency
+set.seed(4)
+n <- 100                       # Number of obs
+x <- rnorm(n, mean = 5, sd = 2) # Predictor variable
+alpha_true <- 2                # True intercept 
+beta_true <- 3                 # True slope 
+sigma <- 5                     # Known standard deviation
+y <- alpha_true + beta_true * x+rnorm(n, sd = sigma) # Response variable with additive random noise
+plot(x,y)
+# Assume std normal priors for alpha and beta
+alpha_prior_mean <- 0
+alpha_prior_sd <- 1
+beta_prior_mean <- 0
+beta_prior_sd <- 1
+
+#number of iterations
+iter <- 5000
+alpha_samples <- rep(NA,iter)
+beta_samples <- rep(NA,iter)
+
+# Initial values for alpha and beta
+alpha <- 0
+beta <- 0
+
+# Gibbs sampling
+for (i in 1:iter) {
+  # Update alpha
+  alpha_posterior_var <- 1 / (1 / alpha_prior_sd^2 + n / sigma^2)
+  alpha_posterior_mean <- alpha_posterior_var * (
+    alpha_prior_mean / alpha_prior_sd^2 + sum(y - beta * x) / sigma^2
+  )
+  alpha <- rnorm(1, mean = alpha_posterior_mean, sd = sqrt(alpha_posterior_var))
+  
+  # Update beta
+  beta_posterior_var <- 1 / (1 / beta_prior_sd^2 + sum(x^2) / sigma^2)
+  beta_posterior_mean <- beta_posterior_var * (
+    beta_prior_mean / beta_prior_sd^2 + sum((y - alpha) * x) / sigma^2
+  )
+  beta <- rnorm(1, mean = beta_posterior_mean, sd = sqrt(beta_posterior_var))
+  
+  # Store samples
+  alpha_samples[i] <- alpha
+  beta_samples[i] <- beta
+}
+
+# Summarize the posterior samples
+alpha_mean <- mean(alpha_samples)
+beta_mean <- mean(beta_samples)
+cat("Posterior mean of alpha:", alpha_mean, "\n")
+cat("Posterior mean of beta:", beta_mean, "\n")
+
+```
+```{r}
+#analytical derivation of posterior distribution
+set.seed(4)
+x <- rnorm(n, mean = 5, sd = 2)
+Y <- alpha_true + beta_true * x+rnorm(n, sd = sigma)
+X<-matrix(c(rep(1,n),x), nrow=n,ncol=2)
+X_t<-t(X)
+z<-(1/sigma^2)*X_t%*%X+diag(2)
+theta_var_mat<-solve(z)
+theta_mu<-theta_var_mat%*%((1/sigma^2)*X_t%*%Y)
+theta_mu
+theta_var_mat
+
+```
+
+```{r}
+# Plot the posterior distributions
+hist(alpha_samples, breaks=100, main = "Posterior of alpha", xlab = "alpha", freq = F)
+# Create a sequence of x values for the normal distribution curve
+x_values <- seq(min(alpha_samples), max(alpha_samples), length = 100)
+
+# Calculate the marginal density for those x values
+alpha_normal_density <- dnorm(x_values, mean = theta_mu[1], sd = sqrt(theta_var_mat[1,1]))
+
+# Add the normal distribution density curve to the histogram
+lines(x_values, alpha_normal_density, col = "red", lwd = 2)
+```
+```{r}
+# Plot the posterior distributions
+hist(beta_samples, breaks=100, main = "Posterior of beta", xlab = "beta", freq = F)
+# Create a sequence of x values for the normal distribution curve
+x_values <- seq(min(beta_samples), max(beta_samples), length = 100)
+
+# Calculate marginal density for those x values
+beta_normal_density <- dnorm(x_values, mean = theta_mu[2], sd = sqrt(theta_var_mat[2,2]))
+
+# Add the normal distribution density curve to the histogram
+lines(x_values, beta_normal_density, col = "blue", lwd = 2)
+```
+
+
+
+```{r}
+#put parameters into single vector
+theta<-matrix(c(alpha_samples,beta_samples), nrow=2, byrow = T)
+
+
+```
+
+
+
+
+
+
+```{r}
+posterior_predictive <- function(Y, X, y, x_new, theta, sigma) {
+  #Y and X are univariate evaluation points
+  #y and x_new are  a reference point that determine the weights
+  #theta is MCMC parameter samples
+  #sigma is known model parameter
+  # Compute all weights in log scale
+  log_w <- sapply(1:ncol(theta), function(t) {
+    dnorm(y, mean = x_new %*% theta[, t], sd = sigma, log=T)
+  })
+  
+  max_log_w <- max(log_w)
+log_sum_exp <- max_log_w + log(sum(exp(log_w - max_log_w)))
+normalized_weights <- exp(log_w - log_sum_exp)
+  
+  
+  # Compute weighted likelihoods
+  weighted_likelihoods <- sapply(1:ncol(theta), function(t) {
+    normalized_weights[t] * dnorm(Y, mean = X %*% theta[, t], sd = sigma)
+  })
+  
+  # Return the sum of weighted likelihoods
+
+  sum(weighted_likelihoods)
+}
+
+```
+
+
+```{r}
+posterior_predictive_v1(y[1], X[1,,drop=F], 14, q, theta, sigma)
+posterior_predictive(y[1], X[1,,drop=F], 14, q, theta, sigma)
+
+```
+
+
+```{r}
+
+full_conformal_prediction <- function(Y, X, y_grid, x_new, theta, sigma, alpha) {
+  #x should be in the form c(1,x)
+  #y and X are observed data
+  #y_grid are values to loop over
+ accepted_y<-c()
+for(l in 1:length(y_grid)){
+   #conformity score on data set
+ sig_1_to_n<-sapply(1:length(Y), function(i)
+    posterior_predictive(Y=Y[i], X=X[i,,drop=F],y=y_grid[l], x_new=x_new, theta=theta, sigma=sigma))
+#conformity score on test point
+sig_n_plus_one<-posterior_predictive(Y=y_grid[l],X=x_new,y=y_grid[l], x_new=x_new,theta = theta, sigma=sigma)
+#adjusted quantile
+n<-length(Y)
+pi<-length(c(which(sig_1_to_n<=sig_n_plus_one),1))/(n+1)
+#k<-ceiling((1-alpha)*(n+1))/n
+#q_hat<-quantile(sig_1_to_n, probs = k)
+if (pi>alpha){
+  accepted_y <- c(accepted_y, y_grid[l])
+  
+}
+}
+ return(accepted_y)
+}
+
+```
+
+
+
+
+
+```{r}
+y_grid <- seq(mean(y) - 3 * sd(y), mean(y) + 3 * sd(y), length.out = 100)
+f<-full_conformal_prediction(Y=y , X=X, y_grid=y_grid, x_new=q, theta, sigma, alpha)
+range(f)
+```
+
+```{r}
+y_grid <- seq(-3,39, length.out = 100)
+conf_x_grid <- seq(min(x), max(x), length.out = 20)
+conf_x_new_mat<-matrix(c(rep(1,20),conf_x_grid ), nrow=20)
+#this involves 20x4000x(100+100)=16,000,000 likelihood evals
+conf_range<- sapply(1:nrow(conf_x_new_mat), function(i) conformal_bounds(conf_x_new_mat[i, , drop=F],y_grid))
+
+```
+
+```{r}
+lower<-matrix(data=conf_range, ncol=20)[1,]
+upper<-matrix(data=conf_range, ncol=20)[2,]
+# Plot the data points
+plot(x, y, pch = 19, col = "blue", 
+     main = "90% posterior predictive credible bands for simulated data", 
+     xlab = "x", ylab = "y", xlim = range(x), ylim = range(y,lower, upper))
+
+polygon(c(conf_x_grid , rev(conf_x_grid )), 
+        c(upper, rev(lower)), 
+        col = rgb(1, 0, 0, 0.2), border = NA)
+
+# Add smooth lines for the credible bands
+lines(conf_x_grid , lower, col = "blue", lwd = 2, lty = 2)  # Lower bound line
+lines(conf_x_grid , upper, col = "blue", lwd = 2, lty = 2)  # Upper bound line
+```
+```{r}
+```
+
+
+
+```{r}
+#create function to get upper and lower bound of predictive interval
+conformal_bounds <- function(x_new,y_grid) {
+  # Compute the range from full_conformal_prediction
+  bounds <- range(full_conformal_prediction(Y = y, X = X, y_grid = y_grid, x_new = x_new, theta = theta, sigma = sigma, alpha = alpha))
+  
+  # Return the bounds as named values
+  return(list(lower = bounds[1], upper = bounds[2]))
+}
+```
+
+
+
+
+
+
+
+
+```{r}
+alpha<-0.1
+# Create a fine grid of x values to approximate the credible bands
+x_grid <- seq(min(x), max(x), length.out = 100)
+#create design matrix for x_new
+x_new_mat<-matrix(c(rep(1,100),x_grid), nrow=100)
+#Use quantiles to get credible intervals, using analytically derived density of the posterior predictive.
+credible_lower <- function(x_new) {
+qnorm(alpha / 2, mean = x_new%*%theta_mu, sd = sqrt(sigma^2+x_new%*%theta_var_mat%*%t(x_new)))
+}
+
+credible_upper <- function(x_new) {
+qnorm(1 - alpha / 2, mean = x_new%*%theta_mu, sd = sqrt(sigma^2+x_new%*%theta_var_mat%*%t(x_new)))
+}
+
+# Calculate the credible interval bounds over the grid(drop preserves dimension of extracted vector)
+lower_bounds <- sapply(1:nrow(x_new_mat), function(i) credible_lower(x_new_mat[i, , drop=F]))
+upper_bounds <- sapply(1:nrow(x_new_mat), function(i) credible_upper(x_new_mat[i, , drop=F]))
+
+# Plot the data points
+plot(x, y, pch = 19, col = "blue", 
+     main = "90% posterior predictive credible bands for simulated data", 
+     xlab = "x", ylab = "y", xlim = range(x), ylim = range(y, lower_bounds, upper_bounds))
+
+polygon(c(x_grid, rev(x_grid)), 
+        c(upper_bounds, rev(lower_bounds)), 
+        col = rgb(1, 0, 0, 0.2), border = NA)
+
+# Add smooth lines for the credible bands
+lines(x_grid, lower_bounds, col = "red", lwd = 2, lty = 2)  # Lower bound line
+lines(x_grid, upper_bounds, col = "red", lwd = 2, lty = 2)  # Upper bound line
+lines(conf_x_grid , lower, col = "blue", lwd = 2, lty = 2)  # conformal lower bound
+lines(conf_x_grid , upper, col = "blue", lwd = 2, lty = 2)  # conformal upper bound
+
+# for the 100 data points 10 of them are outside the bands!
+
+# Add a legend
+legend("bottomright", 
+       legend = c("Credible bands", "Conformal bands"), 
+       col = c("red", "blue"), 
+       lty = 2, lwd = 2, 
+       border = NA, bty = "n")  # Remove legend box
+```
+
+
+
+
+
+
