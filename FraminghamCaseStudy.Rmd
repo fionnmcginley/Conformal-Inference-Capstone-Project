@@ -1,0 +1,250 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+ˆ
+
+```{r}
+#read in data
+data<-read.csv("/Users/Fionn/Downloads/framingham.csv")
+head(data)
+#check which variables have missing values
+colnames(data)[colSums(is.na(data)) > 0]
+
+```
+
+```{r}
+#for Polya-Gamma Augmentation
+library("BayesLogit")
+#for data cleaning
+library("mice")
+#for data manipulation
+library("dplyr")
+```
+
+
+```{r}
+# Convert categorical variables(that have NA's) to factors
+data <- data %>%
+  mutate(
+    education = factor(education),
+    BPMeds = factor(BPMeds)
+  )
+
+# Verify structure
+str(data)
+```
+
+
+```{r}
+imputation_methods <- make.method(data)
+imputation_methods[c("totChol", "BMI", "heartRate", "glucose", "cigsPerDay")] <- "pmm"  # Predictive Mean Matching
+imputation_methods["education"] <- "polr"  # ordered probit
+imputation_methods["BPMeds"] <- "logreg"   # Logistic regression for binary categorical
+# Run multiple imputation
+imputed_data <- mice(data, method = imputation_methods, m = 5, seed = 123)
+
+# Inspect imputed values
+#print(imputed_data)
+# Select one imputed dataset
+filled_data <- complete(imputed_data, 1)
+
+```
+
+```{r}
+#check no NA's remain
+sum(is.na(filled_data))
+str(filled_data$education)
+```
+
+
+
+```{r}
+#make 1st level of education a reference category
+one_hot_encode <- function(df, cat_var) {
+  df[[cat_var]] <- droplevels(factor(df[[cat_var]]))  # Ensure it's a factor
+  dummies <- model.matrix(~ df[[cat_var]], data = df)[, -1, drop = FALSE]  # Remove first column (reference)
+  colnames(dummies) <- sub("df\\[\\[cat_var\\]\\]", cat_var, colnames(dummies))  #  # Find the original column index
+  col_index <- which(names(df) == cat_var)
+
+  # Create a new dataframe with the dummy columns inserted at the original position
+  df_new <- cbind(df[ , 1:(col_index - 1), drop = FALSE],  # Columns before categorical
+                  dummies,  # One-hot encoded variables
+                  df[ , (col_index + 1):ncol(df), drop = FALSE])  # Columns after
+
+  return(df_new)
+}
+final.data <- one_hot_encode(filled_data, "education")
+head(final.data)
+
+
+
+```
+
+
+```{r}
+
+# Convert categorical variables to numeric
+data_numeric <- final.data%>%
+  mutate(across(where(is.character), as.factor)) %>%  # Convert character to factor
+  mutate(across(where(is.factor), as.numeric)) %>%  # Convert factor to numeric
+  mutate(intercept = 1)  # Add intercept before converting to matrix
+
+# Define outcome and predictor variables
+y <- data_numeric$TenYearCHD  # Outcome column
+X <- data_numeric %>%
+  dplyr::select(-TenYearCHD) %>%  # Predictor columns
+  as.matrix()  # Convert to matrix
+
+# Check structure
+print(str(X))  # Ensure X is numeric
+print(dim(X))  # Confirm correct dimensions
+print(head(X))  # Preview the first few rows
+
+```
+
+
+
+```{r}
+
+# Gibbs Sampler for Bayesian Logistic Regression using Polya-Gamma augmentation
+gibbs_sampler <- function(y, X, n_iter = 5000, b_prior = NULL, B_prior_inv = NULL) {
+  
+  # Data dimensions
+  N <- length(y)  # Number of observations
+  P <- ncol(X)    # Number of predictors (including intercept)
+  
+  # Set priors if not provided
+  if (is.null(b_prior)) {
+    b_prior <- rep(0, P)  # Mean of Gaussian prior
+  }
+  if (is.null(B_prior_inv)) {
+    B_prior_inv <- diag(1, P)  # Precision matrix 
+  }
+  
+  # Initialize storage for beta samples
+  beta_samples <- matrix(0, nrow = n_iter, ncol = P)
+  
+  # Initial values
+  beta_init<-rnorm(P, mean=0, sd=0.01)
+  beta <- beta_init  # Start with values close to zero
+  
+  # Gibbs sampling loop
+  for (iter in 1:n_iter) {
+    
+    # Compute psi = X * beta (log-odds)
+    psi <- X %*% beta
+    
+    # Sample omega from Polya-Gamma distribution
+    omega <- rpg(N, rep(1, N), psi)  # PG(1, psi) for logistic regression
+    
+    # Construct diagonal matrix Omega
+   #Omega <- diag(as.vector(omega), N, N)
+    
+    # Compute kappa
+    kappa <- y - 0.5  # Equivalent to (y - n/2) since n = 1
+    
+    # Compute posterior covariance and mean
+    # t(X) %*% (X * omega)
+    A       <- t(X) %*%(X*omega)+ B_prior_inv
+    R      <- chol(A)
+    R.inv   <-backsolve(R, diag(ncol(R)))
+    V_omega <- R.inv%*%t(R.inv)
+    m_omega <- V_omega %*% (t(X) %*% kappa + B_prior_inv %*% b_prior)
+    
+    # Generate N(0,1) deviates in length of m_omega
+    z_i <- rnorm(length(m_omega), 0, 1)
+    #apply transformation so beta~MVN(m_omega,V_omega)
+    beta <- (R.inv%*%z_i)+m_omega
+    
+    # Store the sample
+    beta_samples[iter, ] <- beta
+  }
+  
+  return(beta_samples)
+}
+
+# Example usage
+beta_samples <- gibbs_sampler(y, X, n_iter = 5000,b_prior=rep(50, 18), B_prior_inv=diag(10, 18))
+
+# Posterior mean estimates
+beta_posterior_mean <- colMeans(beta_samples)
+
+# Print results
+print(beta_posterior_mean)
+
+```
+
+
+```{r}
+#gut check to see that estimates obtained from Polya Gamma are reasonable
+  glm_fit <- glm(y ~ X - 1, family = binomial)  #remove intercept from X
+  
+  # Extract MLE coefficients
+  glm_coefs <- coef(glm_fit)
+   glm_coefs
+   #should be close to b-hat-posterior mean
+```
+
+
+
+```{r}
+# Compute linear predictor (log-odds)
+log_odds <- X %*% beta_posterior_mean  
+
+# Convert to probabilities using the sigmoid function
+predicted_probs <- 1 / (1 + exp(-log_odds))
+predicted_labels <- ifelse(predicted_probs > 0.5, 1, 0)
+# Compute Accuracy
+accuracy <- mean(predicted_labels == y)
+print(paste("Model Accuracy:", round(accuracy, 3)))
+
+# Create Confusion Matrix
+table(Predicted = predicted_labels, Actual = y)
+
+```
+
+
+```{r}
+#find laplace approximation to the posterior
+source("/Users/Fionn/Downloads/ModelEvidenceLogistic.R")
+eobj <- evidence.obj( y, X, rep(0, 18) ,diag(0.01, 18) )
+
+bhat <- eobj$newton.method()
+regfisherinf <- -eobj$hessian( bhat )
+postprec <- chol2inv( chol(regfisherinf)) 
+df <- data.frame( y=y, x=X)
+gl <- glm( y~x-1, family=binomial, data=df )
+# check
+gl$coefficients # should be close to bhat
+```
+
+
+
+
+
+```{r}
+#what if we drop education
+noedu.data<-X[,-c(3:5)]
+beta_samples.2 <- gibbs_sampler(y, noedu.data, n_iter = 5000, B_prior_inv=diag(0.01, 15))
+```
+
+
+```{r}
+#accuracy for no education data
+# Compute linear predictor (log-odds)
+log_odds <- noedu.data %*% colMeans(beta_samples.2) 
+
+# Convert to probabilities using the sigmoid function
+predicted_probs <- 1 / (1 + exp(-log_odds))
+predicted_labels <- ifelse(predicted_probs > 0.5, 1, 0)
+# Compute Accuracy
+accuracy <- mean(predicted_labels == y)
+print(paste("Model Accuracy:", round(accuracy, 3)))
+
+# Create Confusion Matrix
+table(Predicted = predicted_labels, Actual = y)
+
+```
+
+
