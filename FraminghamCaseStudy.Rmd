@@ -38,7 +38,8 @@ str(data)
 
 ```{r}
 imputation_methods <- make.method(data)
-imputation_methods[c("totChol", "BMI", "heartRate", "glucose", "cigsPerDay")] <- "pmm"  # Predictive Mean Matching
+ # Predictive Mean Matching for numeric variables
+imputation_methods[c("totChol", "BMI", "heartRate", "glucose", "cigsPerDay")] <- "pmm"  
 imputation_methods["education"] <- "polr"  # ordered probit
 imputation_methods["BPMeds"] <- "logreg"   # Logistic regression for binary categorical
 # Run multiple imputation
@@ -60,6 +61,7 @@ str(filled_data$education)
 
 
 ```{r}
+#need to create dummy variables in education for logistic regression
 #make 1st level of education a reference category
 one_hot_encode <- function(df, cat_var) {
   df[[cat_var]] <- droplevels(factor(df[[cat_var]]))  # Ensure it's a factor
@@ -76,14 +78,10 @@ one_hot_encode <- function(df, cat_var) {
 }
 final.data <- one_hot_encode(filled_data, "education")
 head(final.data)
-
-
-
 ```
 
 
 ```{r}
-
 # Convert categorical variables to numeric
 data_numeric <- final.data%>%
   mutate(across(where(is.character), as.factor)) %>%  # Convert character to factor
@@ -104,10 +102,24 @@ print(head(X))  # Preview the first few rows
 ```
 
 
+```{r}
+#set seed before generating random indices
+set.seed(2003)
+#hold back some rows to make predictions at
+testindices <- sample(c(1:4240), size=100)
+trainindices <- c(1:4240)[-testindices]
+#partition test data
+test.data <- X[testindices , ,drop=F]
+test.resp <- y[testindices]
+#partition training data
+train.data <- X[trainindices , ,drop=F]
+train.resp <- y[trainindices]
+```
+
+
 
 ```{r}
-
-# Gibbs Sampler for Bayesian Logistic Regression using Polya-Gamma augmentation
+# function to set up Gibbs Sampler for beta using Polya-Gamma augmentation
 gibbs_sampler <- function(y, X, n_iter = 5000, b_prior = NULL, B_prior_inv = NULL) {
   
   # Data dimensions
@@ -126,6 +138,7 @@ gibbs_sampler <- function(y, X, n_iter = 5000, b_prior = NULL, B_prior_inv = NUL
   beta_samples <- matrix(0, nrow = n_iter, ncol = P)
   
   # Initial values
+  set.seed(123)
   beta_init<-rnorm(P, mean=0, sd=0.01)
   beta <- beta_init  # Start with values close to zero
   
@@ -148,7 +161,7 @@ gibbs_sampler <- function(y, X, n_iter = 5000, b_prior = NULL, B_prior_inv = NUL
     # t(X) %*% (X * omega)
     A       <- t(X) %*%(X*omega)+ B_prior_inv
     R      <- chol(A)
-    R.inv   <-backsolve(R, diag(ncol(R)))
+    R.inv   <-backsolve(R, diag(rep(1,ncol(R))))
     V_omega <- R.inv%*%t(R.inv)
     m_omega <- V_omega %*% (t(X) %*% kappa + B_prior_inv %*% b_prior)
     
@@ -163,13 +176,15 @@ gibbs_sampler <- function(y, X, n_iter = 5000, b_prior = NULL, B_prior_inv = NUL
   
   return(beta_samples)
 }
+```
 
-# Example usage
-beta_samples <- gibbs_sampler(y, X, n_iter = 5000,b_prior=rep(50, 18), B_prior_inv=diag(10, 18))
 
-# Posterior mean estimates
+```{r}
+#Generate samples of beta on training data, take prior to be N(0,1000)
+beta_samples <- gibbs_sampler(y=train.resp , X=train.data, n_iter = 5000,b_prior=rep(0, 18), B_prior_inv=diag(0.001, 18))
+
+#Preview means of beta
 beta_posterior_mean <- colMeans(beta_samples)
-
 # Print results
 print(beta_posterior_mean)
 
@@ -177,35 +192,37 @@ print(beta_posterior_mean)
 
 
 ```{r}
-#gut check to see that estimates obtained from Polya Gamma are reasonable
-  glm_fit <- glm(y ~ X - 1, family = binomial)  #remove intercept from X
+# quick gut check to see that estimates obtained from Polya Gamma are reasonable
+  glm_fit <- glm(train.resp ~ train.data - 1, family = binomial)  #remove intercept from X
   
   # Extract MLE coefficients
   glm_coefs <- coef(glm_fit)
-   glm_coefs
+ glm_coefs
    #should be close to b-hat-posterior mean
 ```
 
 
 
 ```{r}
+#Compute Model Accuracy and confusion matrix 
 # Compute linear predictor (log-odds)
-log_odds <- X %*% beta_posterior_mean  
+log_odds <- train.data %*% beta_posterior_mean  
 
 # Convert to probabilities using the sigmoid function
 predicted_probs <- 1 / (1 + exp(-log_odds))
 predicted_labels <- ifelse(predicted_probs > 0.5, 1, 0)
 # Compute Accuracy
-accuracy <- mean(predicted_labels == y)
+accuracy <- mean(predicted_labels == train.resp)
 print(paste("Model Accuracy:", round(accuracy, 3)))
 
 # Create Confusion Matrix
-table(Predicted = predicted_labels, Actual = y)
+table(Predicted = predicted_labels, Actual = train.resp)
 
 ```
 
 
 ```{r}
+#may be redundant.,.,..
 #find laplace approximation to the posterior
 source("/Users/Fionn/Downloads/ModelEvidenceLogistic.R")
 eobj <- evidence.obj( y, X, rep(0, 18) ,diag(0.01, 18) )
@@ -213,38 +230,229 @@ eobj <- evidence.obj( y, X, rep(0, 18) ,diag(0.01, 18) )
 bhat <- eobj$newton.method()
 regfisherinf <- -eobj$hessian( bhat )
 postprec <- chol2inv( chol(regfisherinf)) 
-df <- data.frame( y=y, x=X)
-gl <- glm( y~x-1, family=binomial, data=df )
+gl <- glm( y~X-1, family=binomial)
 # check
 gl$coefficients # should be close to bhat
+bhat
 ```
-
-
 
 
 
 ```{r}
-#what if we drop education
-noedu.data<-X[,-c(3:5)]
-beta_samples.2 <- gibbs_sampler(y, noedu.data, n_iter = 5000, B_prior_inv=diag(0.01, 15))
+#function to do AOI importance sampling to estimate the posterior predictive
+logistic_posterior_predictive <- function(Y, X, y, x_new, theta) {
+  # Y: binary outcome (0,1) for existing observation
+  # X: design vector for existing observation (including intercept)
+  # y: reference outcome value (0,1) for computing weights
+  # x_new: design vector for new point (for computing weights)
+  # theta: MCMC parameter samples (each column is a sample)
+ 
+  n_samples <- ncol(theta)
+  
+  # Define dispatch table with just two cases (y=0 and y=1)
+  dispatch_table <- list(
+    # Case: y is 1
+    "one" = function() {
+      # Compute logistic probabilities for y=1 at x_new
+      w <- sapply(1:n_samples, function(t) {
+        1 / (1 + exp(-x_new %*% theta[, t]))
+      })
+      
+      # Normalize weights
+      normalized_weights <- w/sum(w)
+      
+      # Compute weighted likelihoods
+      weighted_likelihoods <- sapply(1:n_samples, function(t) {
+        normalized_weights[t] * (1 / (1 + exp(-X %*% theta[, t])))
+      })
+      
+      if(Y == 1) {
+        return(sum(weighted_likelihoods))
+      } else { # Y == 0
+        return(1 - sum(weighted_likelihoods))
+      }
+    },
+    
+    # Case: y is 0
+    "zero" = function() {
+      # Compute logistic probabilities for y=1 at x_new
+      w <- sapply(1:n_samples, function(t) {
+        1 / (1 + exp(-x_new %*% theta[, t]))
+      })
+      
+      # Normalize weights for y=0
+      normalized_weights <- (1-w)/sum(1-w)
+      
+      # Compute weighted likelihoods
+      weighted_likelihoods <- sapply(1:n_samples, function(t) {
+        normalized_weights[t] * (1 / (1 + exp(X %*% theta[, t])))
+      })
+      
+      if(Y == 1) {
+        return(sum(weighted_likelihoods))
+      } else { # Y == 0
+        return(1 - sum(weighted_likelihoods))
+      }
+    }
+  )
+  
+  # Execute appropriate function based on y value
+  if(y == 1) {
+    return(dispatch_table[["one"]]())
+  } else { # y == 0
+    return(dispatch_table[["zero"]]())
+  }
+}
 ```
 
 
 ```{r}
-#accuracy for no education data
-# Compute linear predictor (log-odds)
-log_odds <- noedu.data %*% colMeans(beta_samples.2) 
+X<-as.matrix(X)
+dim(X)
+dim(X[1, ,drop=F])
+outcome<-as.vector(y)
+beta<-t(beta_samples)
+beta[,1]
+logistic_posterior_predictive(Y=outcome[5], X=X[4, ,drop=F], y=c(0,1), x_new=x_new[1, ,drop=F], theta=beta)
+```
 
-# Convert to probabilities using the sigmoid function
-predicted_probs <- 1 / (1 + exp(-log_odds))
-predicted_labels <- ifelse(predicted_probs > 0.5, 1, 0)
-# Compute Accuracy
-accuracy <- mean(predicted_labels == y)
-print(paste("Model Accuracy:", round(accuracy, 3)))
 
-# Create Confusion Matrix
-table(Predicted = predicted_labels, Actual = y)
+```{r}
+# Function to generate test points with manually specified variable types and last column as intercept
+generate_test_points_with_noise <- function(X, 
+                                           binary_indices, 
+                                           numeric_indices,
+                                           n_samples = 1000, 
+                                           numeric_noise = 0.5, 
+                                           binary_flip_prob = 0.2, 
+                                           seed = 123) {
+  set.seed(seed)
+  
+  # Get dimensions
+  n <- nrow(X)
+  p <- ncol(X)
+  intercept_col <- p  # Last column is intercept
+  
+  # Sample from original data
+  sampled_indices <- sample(1:n, n_samples, replace = TRUE)
+  test_points <- X[sampled_indices, ]
+  
+  # Make sure intercept column is excluded from noise addition
+  binary_indices <- binary_indices[binary_indices != intercept_col]
+  numeric_indices <- numeric_indices[numeric_indices != intercept_col]
+  
+  # Add noise to numeric variables
+  for(i in numeric_indices) {
+    # Calculate standard deviation of the column
+    col_sd <- sd(X[, i])
+    
+    # Add small Gaussian noise
+    test_points[, i] <- round((test_points[, i] + rnorm(n_samples, 0, numeric_noise * col_sd)))
+  }
+  
+  # Add noise to binary variables by randomly flipping values
+  for(i in binary_indices) {
+    # Generate random values between 0 and 1
+    flip <- runif(n_samples) < binary_flip_prob
+    
+    # Flip binary values where flip is TRUE
+    test_points[flip, i] <- 1 - test_points[flip, i]
+  }
+  
+  return(test_points)
+}
+```
+
+
+```{r}
+#randomly samples with replacement from dataset, adds Gaussian noise to numeric variables(wrt the variance along a column), and flips binary variables with a pre-specified probability(leave education and cigs/day out for simplicity)
+x_new<-generate_test_points_with_noise(X,c(1,8,9,10,11), c(2,12,13,14,15,16,17),n_samples=50,seed=2003)
+dim(x_new[1, ,drop=F])
+```s
+
+```{r}
+#create exact Y grid
+y.grid<-list(0,1)
+length(y.grid)
+#assign held back points to x_new
+x_new <- test.data
+```
+
+
+```{r}
+x_new <- test.data
+x_new[1,]
+# Preallocate store for efficiency
+store <- vector("character", length = nrow(x_new))
+
+# Loop through each row of x_new
+for (i in 1:nrow(x_new)) {
+  store[i] <- full_conformal_prediction(
+    Y = y[rand.indices], 
+    X = X[rand.indices, , drop = FALSE], 
+    y_grid = y.grid, 
+    x_new = x_new[i, , drop = FALSE],  # Iterate through rows
+    theta = beta, 
+    alpha = 0.2
+  )
+
+  # Progress indicator every 10 iterations
+  if (i %% 10 == 0 || i == nrow(x_new)) {
+    cat(sprintf("Progress: %d/%d iterations completed.\n", i, nrow(x_new)))
+    flush.console()  # Ensure output appears in real-time
+  }
+}
 
 ```
 
+
+```{r}
+store
+```
+
+
+```{r}
+full_conformal_prediction <- function(Y, X, y_grid, x_new, theta, alpha) {
+  # Track which values are accepted
+  accepted_0 <- FALSE
+  accepted_1 <- FALSE
+  
+  for (l in 1:length(y_grid)) {
+    # Conformity scores on dataset
+    sig_1_to_n <- sapply(1:length(Y), function(i) 
+      logistic_posterior_predictive(Y = Y[i], X = X[i, , drop = FALSE], y = y_grid[[l]], x_new = x_new, theta = theta)
+    )
+    # Conformity score on test point
+    sig_n_plus_one <- logistic_posterior_predictive(Y = y_grid[[l]], X = x_new, y = y_grid[[l]], x_new = x_new, theta = theta)
+    # Adjusted quantile calculation
+    n <- length(Y)
+    pi <- (length(which(sig_1_to_n <= sig_n_plus_one)) + 1) / (n + 1)
+    # Reject points if pi <= alpha
+    if (pi > alpha) {
+      # Mark the value as accepted
+      if (y_grid[[l]] == 0) {
+        accepted_0 <- TRUE
+      } else if (y_grid[[l]] == 1) {
+        accepted_1 <- TRUE
+      }
+    }
+  }
+  
+  # Format the output string based on which values were accepted
+  if (accepted_0 && accepted_1) {
+    return("{0,1}")
+  } else if (accepted_0) {
+    return("{0}")
+  } else if (accepted_1) {
+    return("{1}")
+  } else {
+    return("{}")
+  }
+}
+```
+
+
+```{r}
+
+```
 
