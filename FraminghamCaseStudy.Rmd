@@ -1,8 +1,22 @@
 ---
 title: "R Notebook"
-output: html_notebook
+output:
+  pdf_document: default
+  html_notebook: default
 ---
-ˆ
+
+
+```{r}
+#clear global environment
+rm(list=ls())
+```
+
+```{r}
+#source for functions
+source('/Users/Fionn/Capstone Folder/Capstone Project/AOI.classification.utils.R')
+source('/Users/Fionn/Capstone Folder/Capstone Project/AOI.IS.utils.R')
+```
+
 
 ```{r}
 #read in data
@@ -55,28 +69,25 @@ filled_data <- complete(imputed_data, 1)
 ```{r}
 #check no NA's remain
 sum(is.na(filled_data))
-str(filled_data$education)
 ```
 
 
 
 ```{r}
-#need to create dummy variables in education for logistic regression
-#make 1st level of education a reference category
-one_hot_encode <- function(df, cat_var) {
-  df[[cat_var]] <- droplevels(factor(df[[cat_var]]))  # Ensure it's a factor
-  dummies <- model.matrix(~ df[[cat_var]], data = df)[, -1, drop = FALSE]  # Remove first column (reference)
-  colnames(dummies) <- sub("df\\[\\[cat_var\\]\\]", cat_var, colnames(dummies))  #  # Find the original column index
-  col_index <- which(names(df) == cat_var)
 
-  # Create a new dataframe with the dummy columns inserted at the original position
-  df_new <- cbind(df[ , 1:(col_index - 1), drop = FALSE],  # Columns before categorical
-                  dummies,  # One-hot encoded variables
-                  df[ , (col_index + 1):ncol(df), drop = FALSE])  # Columns after
-
-  return(df_new)
-}
 final.data <- one_hot_encode(filled_data, "education")
+columns_to_standardize <- c(2,12,13,14,15,16,17)
+for (col in columns_to_standardize) {
+  final.data[[col]] <- as.numeric(scale(final.data[[col]]))
+}
+# Get the non-zero indices
+non_zero_indices <- which(final.data[[7]] != 0)
+
+# Extract non-zero values
+non_zero_values <- final.data[[7]][non_zero_indices]
+
+# Standardize only the non-zero values
+final.data[[7]][non_zero_indices] <- (non_zero_values - mean(non_zero_values)) / sd(non_zero_values)
 head(final.data)
 ```
 
@@ -118,70 +129,10 @@ train.resp <- y[trainindices]
 
 
 
-```{r}
-# function to set up Gibbs Sampler for beta using Polya-Gamma augmentation
-gibbs_sampler <- function(y, X, n_iter = 5000, b_prior = NULL, B_prior_inv = NULL) {
-  
-  # Data dimensions
-  N <- length(y)  # Number of observations
-  P <- ncol(X)    # Number of predictors (including intercept)
-  
-  # Set priors if not provided
-  if (is.null(b_prior)) {
-    b_prior <- rep(0, P)  # Mean of Gaussian prior
-  }
-  if (is.null(B_prior_inv)) {
-    B_prior_inv <- diag(1, P)  # Precision matrix 
-  }
-  
-  # Initialize storage for beta samples
-  beta_samples <- matrix(0, nrow = n_iter, ncol = P)
-  
-  # Initial values
-  set.seed(123)
-  beta_init<-rnorm(P, mean=0, sd=0.01)
-  beta <- beta_init  # Start with values close to zero
-  
-  # Gibbs sampling loop
-  for (iter in 1:n_iter) {
-    
-    # Compute psi = X * beta (log-odds)
-    psi <- X %*% beta
-    
-    # Sample omega from Polya-Gamma distribution
-    omega <- rpg(N, rep(1, N), psi)  # PG(1, psi) for logistic regression
-    
-    # Construct diagonal matrix Omega
-   #Omega <- diag(as.vector(omega), N, N)
-    
-    # Compute kappa
-    kappa <- y - 0.5  # Equivalent to (y - n/2) since n = 1
-    
-    # Compute posterior covariance and mean
-    # t(X) %*% (X * omega)
-    A       <- t(X) %*%(X*omega)+ B_prior_inv
-    R      <- chol(A)
-    R.inv   <-backsolve(R, diag(rep(1,ncol(R))))
-    V_omega <- R.inv%*%t(R.inv)
-    m_omega <- V_omega %*% (t(X) %*% kappa + B_prior_inv %*% b_prior)
-    
-    # Generate N(0,1) deviates in length of m_omega
-    z_i <- rnorm(length(m_omega), 0, 1)
-    #apply transformation so beta~MVN(m_omega,V_omega)
-    beta <- (R.inv%*%z_i)+m_omega
-    
-    # Store the sample
-    beta_samples[iter, ] <- beta
-  }
-  
-  return(beta_samples)
-}
-```
-
 
 ```{r}
 #Generate samples of beta on training data, take prior to be N(0,1000)
-beta_samples <- gibbs_sampler(y=train.resp , X=train.data, n_iter = 5000,b_prior=rep(0, 18), B_prior_inv=diag(0.001, 18))
+beta_samples <- gibbs_sampler(y=train.resp , X=train.data, n_iter = 8000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
 
 #Preview means of beta
 beta_posterior_mean <- colMeans(beta_samples)
@@ -221,6 +172,7 @@ table(Predicted = predicted_labels, Actual = train.resp)
 ```
 
 
+
 ```{r}
 #may be redundant.,.,..
 #find laplace approximation to the posterior
@@ -239,220 +191,365 @@ bhat
 
 
 ```{r}
-#function to do AOI importance sampling to estimate the posterior predictive
-logistic_posterior_predictive <- function(Y, X, y, x_new, theta) {
-  # Y: binary outcome (0,1) for existing observation
-  # X: design vector for existing observation (including intercept)
-  # y: reference outcome value (0,1) for computing weights
-  # x_new: design vector for new point (for computing weights)
-  # theta: MCMC parameter samples (each column is a sample)
- 
-  n_samples <- ncol(theta)
-  
-  # Define dispatch table with just two cases (y=0 and y=1)
-  dispatch_table <- list(
-    # Case: y is 1
-    "one" = function() {
-      # Compute logistic probabilities for y=1 at x_new
-      w <- sapply(1:n_samples, function(t) {
-        1 / (1 + exp(-x_new %*% theta[, t]))
-      })
-      
-      # Normalize weights
-      normalized_weights <- w/sum(w)
-      
-      # Compute weighted likelihoods
-      weighted_likelihoods <- sapply(1:n_samples, function(t) {
-        normalized_weights[t] * (1 / (1 + exp(-X %*% theta[, t])))
-      })
-      
-      if(Y == 1) {
-        return(sum(weighted_likelihoods))
-      } else { # Y == 0
-        return(1 - sum(weighted_likelihoods))
-      }
-    },
-    
-    # Case: y is 0
-    "zero" = function() {
-      # Compute logistic probabilities for y=1 at x_new
-      w <- sapply(1:n_samples, function(t) {
-        1 / (1 + exp(-x_new %*% theta[, t]))
-      })
-      
-      # Normalize weights for y=0
-      normalized_weights <- (1-w)/sum(1-w)
-      
-      # Compute weighted likelihoods
-      weighted_likelihoods <- sapply(1:n_samples, function(t) {
-        normalized_weights[t] * (1 / (1 + exp(X %*% theta[, t])))
-      })
-      
-      if(Y == 1) {
-        return(sum(weighted_likelihoods))
-      } else { # Y == 0
-        return(1 - sum(weighted_likelihoods))
-      }
-    }
-  )
-  
-  # Execute appropriate function based on y value
-  if(y == 1) {
-    return(dispatch_table[["one"]]())
-  } else { # y == 0
-    return(dispatch_table[["zero"]]())
-  }
-}
-```
-
-
-```{r}
-X<-as.matrix(X)
-dim(X)
-dim(X[1, ,drop=F])
-outcome<-as.vector(y)
+#transpose beta for input
 beta<-t(beta_samples)
-beta[,1]
-logistic_posterior_predictive(Y=outcome[5], X=X[4, ,drop=F], y=c(0,1), x_new=x_new[1, ,drop=F], theta=beta)
-```
-
-
-```{r}
-# Function to generate test points with manually specified variable types and last column as intercept
-generate_test_points_with_noise <- function(X, 
-                                           binary_indices, 
-                                           numeric_indices,
-                                           n_samples = 1000, 
-                                           numeric_noise = 0.5, 
-                                           binary_flip_prob = 0.2, 
-                                           seed = 123) {
-  set.seed(seed)
-  
-  # Get dimensions
-  n <- nrow(X)
-  p <- ncol(X)
-  intercept_col <- p  # Last column is intercept
-  
-  # Sample from original data
-  sampled_indices <- sample(1:n, n_samples, replace = TRUE)
-  test_points <- X[sampled_indices, ]
-  
-  # Make sure intercept column is excluded from noise addition
-  binary_indices <- binary_indices[binary_indices != intercept_col]
-  numeric_indices <- numeric_indices[numeric_indices != intercept_col]
-  
-  # Add noise to numeric variables
-  for(i in numeric_indices) {
-    # Calculate standard deviation of the column
-    col_sd <- sd(X[, i])
-    
-    # Add small Gaussian noise
-    test_points[, i] <- round((test_points[, i] + rnorm(n_samples, 0, numeric_noise * col_sd)))
-  }
-  
-  # Add noise to binary variables by randomly flipping values
-  for(i in binary_indices) {
-    # Generate random values between 0 and 1
-    flip <- runif(n_samples) < binary_flip_prob
-    
-    # Flip binary values where flip is TRUE
-    test_points[flip, i] <- 1 - test_points[flip, i]
-  }
-  
-  return(test_points)
-}
-```
-
-
-```{r}
-#randomly samples with replacement from dataset, adds Gaussian noise to numeric variables(wrt the variance along a column), and flips binary variables with a pre-specified probability(leave education and cigs/day out for simplicity)
-x_new<-generate_test_points_with_noise(X,c(1,8,9,10,11), c(2,12,13,14,15,16,17),n_samples=50,seed=2003)
-dim(x_new[1, ,drop=F])
-```s
-
-```{r}
 #create exact Y grid
 y.grid<-list(0,1)
-length(y.grid)
 #assign held back points to x_new
 x_new <- test.data
+dim(x_new)
+gibbs.SE(t(beta))
+```
+
+
+
+```{r}
+#get conformal sets on test data
+CB.sets<-conf.sets.parallel(x_new=test.data, train.resp=train.resp, train.data=train.data, y.grid=y.grid, beta=beta, alpha=0.1)
 ```
 
 
 ```{r}
-x_new <- test.data
-x_new[1,]
-# Preallocate store for efficiency
-store <- vector("character", length = nrow(x_new))
-
-# Loop through each row of x_new
-for (i in 1:nrow(x_new)) {
-  store[i] <- full_conformal_prediction(
-    Y = y[rand.indices], 
-    X = X[rand.indices, , drop = FALSE], 
-    y_grid = y.grid, 
-    x_new = x_new[i, , drop = FALSE],  # Iterate through rows
-    theta = beta, 
-    alpha = 0.2
-  )
-
-  # Progress indicator every 10 iterations
-  if (i %% 10 == 0 || i == nrow(x_new)) {
-    cat(sprintf("Progress: %d/%d iterations completed.\n", i, nrow(x_new)))
-    flush.console()  # Ensure output appears in real-time
-  }
-}
-
+CB.sets
+bayes.pred(x_new,beta,0.1)
+which(bayes.pred(x_new,beta,0.1)=="{0,1}")
+which(test.resp==1)
 ```
 
-
 ```{r}
-store
-```
-
-
-```{r}
-full_conformal_prediction <- function(Y, X, y_grid, x_new, theta, alpha) {
-  # Track which values are accepted
-  accepted_0 <- FALSE
-  accepted_1 <- FALSE
-  
-  for (l in 1:length(y_grid)) {
-    # Conformity scores on dataset
-    sig_1_to_n <- sapply(1:length(Y), function(i) 
-      logistic_posterior_predictive(Y = Y[i], X = X[i, , drop = FALSE], y = y_grid[[l]], x_new = x_new, theta = theta)
-    )
-    # Conformity score on test point
-    sig_n_plus_one <- logistic_posterior_predictive(Y = y_grid[[l]], X = x_new, y = y_grid[[l]], x_new = x_new, theta = theta)
-    # Adjusted quantile calculation
-    n <- length(Y)
-    pi <- (length(which(sig_1_to_n <= sig_n_plus_one)) + 1) / (n + 1)
-    # Reject points if pi <= alpha
-    if (pi > alpha) {
-      # Mark the value as accepted
-      if (y_grid[[l]] == 0) {
-        accepted_0 <- TRUE
-      } else if (y_grid[[l]] == 1) {
-        accepted_1 <- TRUE
-      }
+coverage<-function(true.label, pred.sets){
+  counter<-numeric(length(true.label))
+  for (i in 1:length(true.label)){
+    if (true.label[i]==1 && (pred.sets[i]=="{0,1}" || pred.sets[i]=="{1}")){
+      counter[i]<-1
+    }
+    else if (true.label[i]==0 && (pred.sets[i]=="{0,1}" || pred.sets[i]=="{0}")){
+      counter[i]<-1
+    }
+    else {
+      counter[i]<-0
     }
   }
-  
-  # Format the output string based on which values were accepted
-  if (accepted_0 && accepted_1) {
-    return("{0,1}")
-  } else if (accepted_0) {
-    return("{0}")
-  } else if (accepted_1) {
-    return("{1}")
-  } else {
-    return("{}")
+  return(mean(counter))
+}
+coverage(test.resp, CB.sets)
+coverage(test.resp,bayes.pred(x_new,beta,0.1) )
+```
+```{r}
+ave.size<-function(pred.sets){
+  counter<-numeric(length(pred.sets))
+  for (i in 1:length(pred.sets)){
+    if(pred.sets [i]=="{}"){
+      counter[i]<-0
+    }
+    else if (pred.sets [i]=="{0,1}"){
+      counter[i]<-2
+    }
+    else {
+      counter[i]<-1
+    }
   }
+  return(mean(counter))
+}
+ave.size(CB.sets)
+ave.size(bayes.pred(x_new,beta,0.1))
+```
+
+```{r}
+#compute_single_element_misclassification(predictions = CB.sets, actuals=test.resp)
+compute_single_element_misclassification(predictions = bayes.pred(x_new,beta,0.2), actuals=test.resp)
+```
+
+
+
+
+```{r}
+# Define alpha values to test
+alpha_values <- seq(0.05, 0.3, by = 0.025)
+
+# Run analysis
+results <- plot_uninformative_rates(
+  train.resp = train.resp,
+  train.data = train.data,
+  y.grid = y.grid,
+  x_new = x_new,
+  theta = beta,
+  alpha_values = alpha_values
+)
+
+# Print results table
+print(results)
+```
+
+
+```{r}
+bayes_plot_uninformative_rates <- function(x_new, theta, 
+                                   alpha_values = seq(0.01, 0.5, by = 0.05)) {
+  
+  # Create storage for results
+  results <- data.frame(
+    alpha = alpha_values,
+    empty_count = 0,
+    full_count = 0,
+    uninformative_rate = 0
+  )
+  
+  # For each alpha value
+  for (a_idx in 1:length(alpha_values)) {
+    alpha <- alpha_values[a_idx]
+    cat(sprintf("Processing alpha = %.2f (%d/%d)\n", alpha, a_idx, length(alpha_values)))
+    
+    # Preallocate store for efficiency
+    store <- vector("character", length = nrow(x_new))
+    
+    # Loop through each row of x_new
+    for (i in 1:nrow(x_new)) {
+      # Pass only the current row to bayes.pred
+      store[i] <- bayes.pred(x_new = x_new[i, , drop=FALSE], theta = theta, alpha = alpha)
+      
+      # Optional progress indicator 
+      if (i %% 50 == 0 || i == nrow(x_new)) {
+        cat(sprintf("  Progress: %d/%d rows completed\r", i, nrow(x_new)))
+        flush.console()
+      }
+    }
+    
+    # Count empty and full sets
+    empty_count <- sum(store == "{}")
+    full_count <- sum(store == "{0,1}")
+    uninformative_count <- empty_count + full_count
+    
+    # Store results
+    results$empty_count[a_idx] <- empty_count
+    results$full_count[a_idx] <- full_count
+    results$uninformative_rate[a_idx] <- uninformative_count/nrow(x_new)
+    
+    cat("\n")
+  }
+  
+  # Plot the results
+  par(mfrow=c(1,2))
+  
+  # Plot uninformative rate
+  plot(results$alpha, results$uninformative_rate, type="o", col="blue", 
+       xlab="Alpha", ylab="Uninformative Prediction Rate",
+       main="Rate of Uninformative Predictions", ylim=c(0.1, 0.9))
+  grid()
+  
+  # Plot breakdown of empty vs full sets
+  barplot(t(as.matrix(results[,c("empty_count", "full_count")])), 
+          beside=TRUE, names.arg=results$alpha,
+          col=c("red", "green"), 
+          main="Breakdown of Uninformative Predictions",
+          xlab="Alpha", ylab="Count")
+  legend("topright", legend=c("Full sets {0,1}"), 
+         fill=c("green"))
+  
+  # Reset plot settings
+  par(mfrow=c(1,1))
+  
+  return(results)
 }
 ```
 
 
 ```{r}
+# Define alpha values to test
+alpha_values <- seq(0.05, 0.3, by = 0.025)
 
+# Run analysis
+results <- bayes_plot_uninformative_rates(
+  x_new = x_new,
+  theta = beta,
+  alpha_values = alpha_values
+)
+
+# Print results table
+print(results)
+```
+
+
+```{r}
+bayes_plot_missclassify_rates <- function(x_new, y_true, theta, 
+                                   alpha_values = seq(0.01, 0.5, by = 0.05)) {
+  
+  # Create storage for results
+  results <- data.frame(
+    alpha = alpha_values,
+    empty_count = 0,
+    full_count = 0,
+    single_element_count = 0,
+    misclassification_count = 0,
+    uninformative_rate = 0,
+    misclassification_rate = 0
+  )
+  
+  # For each alpha value
+  for (a_idx in 1:length(alpha_values)) {
+    alpha <- alpha_values[a_idx]
+    cat(sprintf("Processing alpha = %.2f (%d/%d)\n", alpha, a_idx, length(alpha_values)))
+    
+    # Preallocate store for efficiency
+    store <- vector("character", length = nrow(x_new))
+    
+    # Loop through each row of x_new
+    for (i in 1:nrow(x_new)) {
+      # Pass only the current row to bayes.pred
+      store[i] <- bayes.pred(x_new = x_new[i, , drop=FALSE], theta = theta, alpha = alpha)
+      
+      # Optional progress indicator 
+      if (i %% 50 == 0 || i == nrow(x_new)) {
+        cat(sprintf("  Progress: %d/%d rows completed\r", i, nrow(x_new)))
+        flush.console()
+      }
+    }
+    
+    # Count empty and full sets
+    empty_count <- sum(store == "{}")
+    full_count <- sum(store == "{0,1}")
+    uninformative_count <- empty_count + full_count
+    
+    # Count single-element predictions and misclassifications
+    single_0_indices <- store == "{0}"
+    single_1_indices <- store == "{1}"
+    single_element_count <- sum(single_0_indices) + sum(single_1_indices)
+    
+    # Calculate misclassifications for single-element predictions
+    misclassifications <- 0
+    
+    # For predictions of {0}, check if true label is 1
+    misclassifications <- misclassifications + sum(single_0_indices & y_true == 1)
+    
+    # For predictions of {1}, check if true label is 0
+    misclassifications <- misclassifications + sum(single_1_indices & y_true == 0)
+    
+    # Store results
+    results$empty_count[a_idx] <- empty_count
+    results$full_count[a_idx] <- full_count
+    results$single_element_count[a_idx] <- single_element_count
+    results$misclassification_count[a_idx] <- misclassifications
+    results$uninformative_rate[a_idx] <- uninformative_count/nrow(x_new)
+    
+    # Calculate misclassification rate (only among single-element predictions)
+    if (single_element_count > 0) {
+      results$misclassification_rate[a_idx] <- misclassifications/single_element_count
+    } else {
+      results$misclassification_rate[a_idx] <- NA
+    }
+    
+    cat("\n")
+  }
+  
+  # Plot only the misclassification rate
+  plot(results$alpha, results$misclassification_rate, type="o", col="purple", 
+       xlab="Alpha", ylab="Misclassification Rate",
+       main="Misclassification Rate (Single-Element Predictions)")
+  grid()
+  
+  return(results)
+}
+```
+
+
+```{r}
+bayes_plot_missclassify_rates(x_new= x_new, y_true=test.resp, theta=beta,alpha_values = seq(0.05, 0.3, by = 0.025) )
+```
+
+
+```{r}
+conf_plot_missclassify_rates <- function(train.resp, train.data, y.grid, x_new, y_true, theta, 
+                                 alpha_values = seq(0.01, 0.5, by = 0.05)) {
+  
+  # Create storage for results
+  results <- data.frame(
+    alpha = alpha_values,
+    empty_count = 0,
+    full_count = 0,
+    single_element_count = 0,
+    misclassification_count = 0,
+    uninformative_rate = 0,
+    misclassification_rate = 0
+  )
+  
+  # For each alpha value
+  for (a_idx in 1:length(alpha_values)) {
+    alpha <- alpha_values[a_idx]
+    cat(sprintf("Processing alpha = %.2f (%d/%d)\n", alpha, a_idx, length(alpha_values)))
+    
+    # Preallocate store for efficiency
+    store <- vector("character", length = nrow(x_new))
+    
+    
+    # Use the parallel version to get all confidence sets at once
+    store <- conf.sets.parallel(
+      x_new = x_new,
+      train.resp = train.resp, 
+      train.data = train.data, 
+      y.grid = y.grid, 
+      beta = theta, 
+      alpha = alpha
+    )
+    
+      
+      # Optional progress indicator 
+
+    
+    # Count empty and full sets
+    empty_count <- sum(store == "{}")
+    full_count <- sum(store == "{0,1}")
+    uninformative_count <- empty_count + full_count
+    
+    # Count single-element predictions and misclassifications
+    single_0_indices <- store == "{0}"
+    single_1_indices <- store == "{1}"
+    single_element_count <- sum(single_0_indices) + sum(single_1_indices)
+    
+    # Calculate misclassifications for single-element predictions
+    misclassifications <- 0
+    
+    # For predictions of {0}, check if true label is 1
+    misclassifications <- misclassifications + sum(single_0_indices & y_true == 1)
+    
+    # For predictions of {1}, check if true label is 0
+    misclassifications <- misclassifications + sum(single_1_indices & y_true == 0)
+    
+    # Store results
+    results$empty_count[a_idx] <- empty_count
+    results$full_count[a_idx] <- full_count
+    results$single_element_count[a_idx] <- single_element_count
+    results$misclassification_count[a_idx] <- misclassifications
+    results$uninformative_rate[a_idx] <- uninformative_count/nrow(x_new)
+    
+    # Calculate misclassification rate (only among single-element predictions)
+    if (single_element_count > 0) {
+      results$misclassification_rate[a_idx] <- misclassifications/single_element_count
+    } else {
+      results$misclassification_rate[a_idx] <- NA
+    }
+    
+    cat("\n")
+  }
+  
+  # Plot only the misclassification rate
+  plot(results$alpha, results$misclassification_rate, type="o", col="purple", 
+       xlab="Alpha", ylab="Misclassification Rate",
+       main="Misclassification Rate (Single-Element Predictions)")
+  grid()
+  
+  return(results)
+}
+```
+
+
+
+```{r}
+conf_plot_missclassify_rates(train.resp, train.data, y.grid, x_new, y_true=test.resp, theta=beta, 
+                                 alpha_values = seq(0.05, 0.7, by = 0.05))
+```
+
+
+```{r}
+compare_missclassify_rates(train.resp, train.data, y.grid, x_new, y_true=test.resp, theta=beta, 
+                                 alpha_values = seq(0.05, 0.5, by = 0.05))
 ```
 
