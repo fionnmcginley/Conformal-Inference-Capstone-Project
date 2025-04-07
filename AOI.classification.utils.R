@@ -104,7 +104,7 @@ logistic_posterior_predictive_vec <- function(Y, X, y, x_new, theta) {
     
     # Compute probabilities for each observation and sample
     for(i in 1:n_obs) {
-      all_probs[i,] <- drop(1 / (1 + exp(X[i,,drop=FALSE] %*% theta)))
+      all_probs[i,] <- drop(1 - (1 / (1 + exp(-X[i,,drop=FALSE] %*% theta))))
     }
   }
   
@@ -134,9 +134,9 @@ full_conformal_classify <- function(Y, X, y_grid, x_new, theta, alpha) {
     sig_n_plus_one <- logistic_posterior_predictive_vec(Y = y_grid[[l]], X = x_new, y = y_grid[[l]], x_new = x_new, theta = theta)
     # Adjusted quantile calculation
     n <- length(Y)
-    pi <- (length(which(sig_1_to_n <= sig_n_plus_one)) + 1)/(n+1) 
+    pi <- (length(which(sig_1_to_n < sig_n_plus_one)) + 1)/(n+1)
     # Reject points if pi <= alpha
-    if (pi > alpha) {
+    if (pi > (alpha)) {
       # Mark the value as accepted
       if (y_grid[[l]] == 0) {
         accepted_0 <- TRUE
@@ -158,6 +158,90 @@ full_conformal_classify <- function(Y, X, y_grid, x_new, theta, alpha) {
   }
 }
 #parallel functrion computes conformal sets over x_new
+logistic_posterior_predictive_vec.v2 <- function(Y, X, y, x_new, theta) {
+  # Return predictive likelihood for both existing data and new point
+  n_obs <- length(Y)
+  existing_scores <- numeric(n_obs)
+  
+  # For existing observations
+  for (i in 1:n_obs) {
+    probs <- 1 / (1 + exp(-X[i,,drop=FALSE] %*% theta))
+    class_probs <- ifelse(Y[i] == 1, probs, 1-probs)
+    existing_scores[i] <- mean(class_probs)
+  }
+  
+  # For new point
+  probs_new <- 1 / (1 + exp(-x_new %*% theta))
+  new_score <- mean(ifelse(y == 1, probs_new, 1-probs_new))
+  
+  return(list(existing = existing_scores, new = new_score))
+}
+full_conformal_classify.v2
+full_conformal_classify.v2 <- function(Y, X, y_grid, x_new, theta, alpha) {
+  accepted_0 <- FALSE
+  accepted_1 <- FALSE
+  
+  for (l in 1:length(y_grid)) {
+    # Get conformity scores
+    scores <- logistic_posterior_predictive_vec.v2(Y, X, y_grid[l], x_new, theta)
+    
+    # Compute p-value
+    n <- length(Y)
+    pi <- (sum(scores$existing < scores$new) + 1) / (n + 1)
+    
+    # Include point if p-value > alpha
+    if (pi > alpha) {
+      if (y_grid[l] == 0) accepted_0 <- TRUE
+      else accepted_1 <- TRUE
+    }
+  }
+  
+  # Return prediction set
+  if (accepted_0 && accepted_1) return("{0,1}")
+  else if (accepted_0) return("{0}")
+  else if (accepted_1) return("{1}")
+  else return("{}")
+}
+conf.sets.parallel.v2 <- function(x_new, train.resp, train.data, y.grid, beta, alpha) {
+  # Create cluster only once
+  num_cores <- detectCores() - 1
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
+  
+  # Export necessary functions
+  clusterExport(cl, varlist = c("logistic_posterior_predictive_vec", "full_conformal_classify"), 
+                envir = environment())
+  
+  # Distribute row indices across cores
+  row_indices <- 1:nrow(x_new)
+  chunks <- split(row_indices, cut(row_indices, num_cores, labels=FALSE))
+  
+  conf_sets <- foreach(idx = chunks, .combine = c, .packages = c("foreach")) %dopar% {
+    # Create storage for results from this chunk
+    chunk_results <- numeric(length(idx))
+    
+    # Process each row in this chunk
+    for (i in seq_along(idx)) {
+      row_idx <- idx[i]
+      x_new_i <- x_new[row_idx, , drop = FALSE]
+      
+      # Assuming full_conformal_classify returns a single value per row
+      chunk_results[i] <- full_conformal_classify.v2(
+        Y = train.resp, 
+        X = train.data, 
+        y_grid = y.grid, 
+        x_new = x_new_i,
+        theta = beta, 
+        alpha = alpha
+      )
+    }
+    
+    return(chunk_results)
+  }
+  
+  stopCluster(cl)
+  return(conf_sets)
+}
 conf.sets.parallel <- function(x_new, train.resp, train.data, y.grid, beta, alpha) {
   # Create cluster only once
   num_cores <- detectCores() - 1
@@ -466,6 +550,51 @@ compute_single_element_misclassification <- function(predictions, actuals) {
     incorrect_predictions = incorrect_count,
     misclassification_rate = misclassification_rate,
     single_element_proportion = single_element_count / n
+  ))
+}
+
+create.splits <- function(X, y, num_splits = 10, test_size = 100, seed = NULL) {
+  # Set seed for reproducibility if provided
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  # Create lists to store all the split dataframes
+  test_data_list <- list()
+  test_resp_list <- list()
+  train_data_list <- list()
+  train_resp_list <- list()
+  test_indices_list <- list()
+  train_indices_list <- list()
+  
+  # Total number of observations
+  n_obs <- nrow(X)
+  
+  # Generate splits
+  for (i in 1:num_splits) {
+    # Generate random test indices
+    test_indices <- sample(1:n_obs, size = test_size)
+    train_indices <- setdiff(1:n_obs, test_indices)
+    
+    # Store indices
+    test_indices_list[[i]] <- test_indices
+    train_indices_list[[i]] <- train_indices
+    
+    # Create split data
+    test_data_list[[i]] <- X[test_indices, , drop = FALSE]
+    test_resp_list[[i]] <- y[test_indices]
+    train_data_list[[i]] <- X[train_indices, , drop = FALSE]
+    train_resp_list[[i]] <- y[train_indices]
+  }
+  
+  # Return as a named list for easy access
+  return(list(
+    test_data = test_data_list,
+    test_resp = test_resp_list,
+    train_data = train_data_list,
+    train_resp = train_resp_list,
+    test_indices = test_indices_list,
+    train_indices = train_indices_list
   ))
 }
 
