@@ -14,7 +14,6 @@ rm(list=ls())
 ```{r}
 #source for functions
 source('/Users/Fionn/Capstone Folder/Capstone Project/AOI.classification.utils.R')
-source('/Users/Fionn/Capstone Folder/Capstone Project/AOI.IS.utils.R')
 ```
 
 
@@ -111,28 +110,20 @@ print(dim(X))  # Confirm correct dimensions
 print(head(X))  # Preview the first few rows
 
 ```
-
-
 ```{r}
-#set seed before generating random indices
-set.seed(2003)
-#hold back some rows to make predictions at
-testindices <- sample(c(1:4240), size=100)
-trainindices <- c(1:4240)[-testindices]
-#partition test data
-test.data <- X[testindices , ,drop=F]
-test.resp <- y[testindices]
-#partition training data
-train.data <- X[trainindices , ,drop=F]
-train.resp <- y[trainindices]
+#create multiple splits for checking
+splits<-create.splits(X, y, num_splits = 50, test_size = 100, seed = 2003)
 ```
+
+
+
 
 
 
 
 ```{r}
 #Generate samples of beta on training data, take prior to be N(0,1000)
-beta_samples <- gibbs_sampler(y=train.resp , X=train.data, n_iter = 8000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
+beta_samples<-gibbs_sampler(y=splits$train_resp[[1]] , X=splits$train_data[[1]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
 
 #Preview means of beta
 beta_posterior_mean <- colMeans(beta_samples)
@@ -144,7 +135,7 @@ print(beta_posterior_mean)
 
 ```{r}
 # quick gut check to see that estimates obtained from Polya Gamma are reasonable
-  glm_fit <- glm(train.resp ~ train.data - 1, family = binomial)  #remove intercept from X
+  glm_fit <- glm(splits$train_resp[[1]] ~ splits$train_data[[1]] - 1, family = binomial)  #remove intercept from X
   
   # Extract MLE coefficients
   glm_coefs <- coef(glm_fit)
@@ -157,17 +148,17 @@ print(beta_posterior_mean)
 ```{r}
 #Compute Model Accuracy and confusion matrix 
 # Compute linear predictor (log-odds)
-log_odds <- train.data %*% beta_posterior_mean  
+log_odds <- splits$train_data[[1]] %*% beta_posterior_mean  
 
 # Convert to probabilities using the sigmoid function
 predicted_probs <- 1 / (1 + exp(-log_odds))
 predicted_labels <- ifelse(predicted_probs > 0.5, 1, 0)
 # Compute Accuracy
-accuracy <- mean(predicted_labels == train.resp)
+accuracy <- mean(predicted_labels == splits$train_resp[[1]])
 print(paste("Model Accuracy:", round(accuracy, 3)))
 
 # Create Confusion Matrix
-table(Predicted = predicted_labels, Actual = train.resp)
+table(Predicted = predicted_labels, Actual = splits$train_resp[[1]])
 
 ```
 
@@ -189,31 +180,118 @@ bhat
 ```
 
 
+```{r}
+#test coverage over 20 repeats
+# Create cluster once at the beginning
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+# Pre-export common functions
+clusterExport(cl, c("logistic_posterior_predictive_vec", "full_conformal_classify"), 
+              envir = environment())
+
+# Prepare to collect coverage results
+coverage_results <- numeric(length(splits$train_resp))
+
+# Start timing
+start_time <- Sys.time()
+
+# Process 20 splits
+for (i in 1:length(splits$train_resp)) {
+  cat("Processing split", i, "at", format(Sys.time(), "%H:%M:%S"), "\n")
+  beta.samples<-gibbs_sampler(y=splits$train_resp[[i]] , X=splits$train_data[[i]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
+  # Use the parallel implementation with the shared cluster
+  CB.sets <- conf.sets.parallel.v2(
+    x_new = splits$test_data[[i]], 
+    train.resp = splits$train_resp[[i]], 
+    train.data = splits$train_data[[i]], 
+    y.grid = list(0,1), 
+    beta = t(beta.samples), 
+    alpha = 0.2 )
+  
+  # Calculate coverage for this split
+  coverage_results[i] <- coverage(splits$test_resp[[i]], CB.sets)
+  
+  # Report progress
+  current_time <- Sys.time()
+  elapsed <- difftime(current_time, start_time, units = "mins")
+  cat("Completed split", i, "- Elapsed time:", round(elapsed, 2), "minutes\n")
+}
+
+# Stop the cluster when completely done
+stopCluster(cl)
+
+# Calculate summary statistics
+mean_coverage <- mean(coverage_results)
+sd_coverage <- sd(coverage_results)
+cat("\nMean coverage:", mean_coverage, "\n")
+cat("Standard deviation:", sd_coverage, "\n")
+```
+```{r}
+coverage_results
+```
+
 
 ```{r}
-#transpose beta for input
-beta<-t(beta_samples)
-#create exact Y grid
-y.grid<-list(0,1)
-#assign held back points to x_new
-x_new <- test.data
-dim(x_new)
-gibbs.SE(t(beta))
+
+#test coverage for 50 repeats on Bayes
+# Prepare to collect coverage results
+coverage_results <- numeric(length(splits$train_resp))
+
+start_time <- Sys.time()
+# Process all 20 splits
+for (i in 1:length(splits$train_resp)) {
+    cat("Processing split", i, "at", format(Sys.time(), "%H:%M:%S"), "\n")
+  beta.samples<-gibbs_sampler(y=splits$train_resp[[i]] , X=splits$train_data[[i]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
+  
+  # Use the parallel implementation with the shared cluster
+  B.sets <-bayes.pred(splits$test_data[[i]],t(beta.samples),0.2) 
+  
+  # Calculate coverage for this split
+  coverage_results[i] <- coverage(splits$test_resp[[i]], B.sets)
+    # Report progress
+  current_time <- Sys.time()
+  elapsed <- difftime(current_time, start_time, units = "mins")
+  cat("Completed split", i, "- Elapsed time:", round(elapsed, 2), "minutes\n")
+}
+
+
+# Calculate summary statistics
+mean_coverage <- mean(coverage_results)
+sd_coverage <- sd(coverage_results)
+cat("\nMean coverage:", mean_coverage, "\n")
+cat("Standard deviation:", sd_coverage, "\n")
 ```
 
 
 
 ```{r}
+library(doParallel)
+library(foreach)
 #get conformal sets on test data
-CB.sets<-conf.sets.parallel(x_new=test.data, train.resp=train.resp, train.data=train.data, y.grid=y.grid, beta=beta, alpha=0.1)
+beta<-gibbs_sampler(y=splits$train_resp[[2]] , X=splits$train_data[[2]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
+
+CB.sets1<-conf.sets.parallel.v2(x_new=splits$test_data[[2]], train.resp=splits$train_resp[[2]], train.data=splits$train_data[[2]], y.grid=list(0,1), beta=t(beta), alpha=0.15)
+```
+
+```{r}
+library(doParallel)
+library(foreach)
+#get conformal sets on test data
+beta<-gibbs_sampler(y=splits$train_resp[[1]] , X=splits$train_data[[1]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
+
+CB.sets2<-conf.sets.parallel(x_new=splits$test_data[[1]], train.resp=splits$train_resp[[1]], train.data=splits$train_data[[1]], y.grid=list(0,1), beta=t(beta), alpha=0.5)
 ```
 
 
 ```{r}
-CB.sets
-bayes.pred(x_new,beta,0.1)
-which(bayes.pred(x_new,beta,0.1)=="{0,1}")
-which(test.resp==1)
+CB.sets2
+bayes.pred(splits$test_data[[2]],t(beta),0.5)
+which(splits$test_resp[[1]]==1)
+```
+
+```{r}
+splits$train_resp[[1]]
 ```
 
 ```{r}
@@ -232,8 +310,8 @@ coverage<-function(true.label, pred.sets){
   }
   return(mean(counter))
 }
-coverage(test.resp, CB.sets)
-coverage(test.resp,bayes.pred(x_new,beta,0.1) )
+coverage(splits$test_resp[[1]], CB.sets2)
+coverage(splits$test_resp[[3]],bayes.pred(splits$test_data[[3]],t(beta),0.2) )
 ```
 ```{r}
 ave.size<-function(pred.sets){
@@ -257,7 +335,8 @@ ave.size(bayes.pred(x_new,beta,0.1))
 
 ```{r}
 #compute_single_element_misclassification(predictions = CB.sets, actuals=test.resp)
-compute_single_element_misclassification(predictions = bayes.pred(x_new,beta,0.2), actuals=test.resp)
+compute_single_element_misclassification(predictions = bayes.pred(x_new,beta,0.1), actuals=test.resp)
+compute_single_element_misclassification(predictions =CB.sets, actuals=test.resp)
 ```
 
 
@@ -265,19 +344,23 @@ compute_single_element_misclassification(predictions = bayes.pred(x_new,beta,0.2
 
 ```{r}
 # Define alpha values to test
-alpha_values <- seq(0.05, 0.3, by = 0.025)
-
+alpha_values <-seq(0.05, 0.5, by = 0.05)
+beta<-gibbs_sampler(y=splits$train_resp[[3]] , X=splits$train_data[[3]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
 # Run analysis
 results <- plot_uninformative_rates(
-  train.resp = train.resp,
-  train.data = train.data,
-  y.grid = y.grid,
-  x_new = x_new,
-  theta = beta,
+  train.resp = splits$train_resp[[3]],
+  train.data = splits$train_data[[3]],
+  y.grid = list(0,1),
+  x_new = splits$test_data[[3]],
+  theta = t(beta),
   alpha_values = alpha_values
 )
 
 # Print results table
+print(results)
+```
+
+```{r}
 print(results)
 ```
 
@@ -333,14 +416,14 @@ bayes_plot_uninformative_rates <- function(x_new, theta,
   # Plot uninformative rate
   plot(results$alpha, results$uninformative_rate, type="o", col="blue", 
        xlab="Alpha", ylab="Uninformative Prediction Rate",
-       main="Rate of Uninformative Predictions", ylim=c(0.1, 0.9))
+        ylim=c(0, 1))
   grid()
   
   # Plot breakdown of empty vs full sets
   barplot(t(as.matrix(results[,c("empty_count", "full_count")])), 
           beside=TRUE, names.arg=results$alpha,
           col=c("red", "green"), 
-          main="Breakdown of Uninformative Predictions",
+          
           xlab="Alpha", ylab="Count")
   legend("topright", legend=c("Full sets {0,1}"), 
          fill=c("green"))
@@ -354,13 +437,14 @@ bayes_plot_uninformative_rates <- function(x_new, theta,
 
 
 ```{r}
+beta<-gibbs_sampler(y=splits$train_resp[[2]] , X=splits$train_data[[2]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
 # Define alpha values to test
-alpha_values <- seq(0.05, 0.3, by = 0.025)
+alpha_values <- seq(0.05, 0.5, by = 0.05)
 
 # Run analysis
 results <- bayes_plot_uninformative_rates(
-  x_new = x_new,
-  theta = beta,
+  x_new = splits$test_data[[2]],
+  theta = t(beta),
   alpha_values = alpha_values
 )
 
@@ -451,105 +535,19 @@ bayes_plot_missclassify_rates <- function(x_new, y_true, theta,
 ```
 
 
-```{r}
-bayes_plot_missclassify_rates(x_new= x_new, y_true=test.resp, theta=beta,alpha_values = seq(0.05, 0.3, by = 0.025) )
-```
 
 
-```{r}
-conf_plot_missclassify_rates <- function(train.resp, train.data, y.grid, x_new, y_true, theta, 
-                                 alpha_values = seq(0.01, 0.5, by = 0.05)) {
-  
-  # Create storage for results
-  results <- data.frame(
-    alpha = alpha_values,
-    empty_count = 0,
-    full_count = 0,
-    single_element_count = 0,
-    misclassification_count = 0,
-    uninformative_rate = 0,
-    misclassification_rate = 0
-  )
-  
-  # For each alpha value
-  for (a_idx in 1:length(alpha_values)) {
-    alpha <- alpha_values[a_idx]
-    cat(sprintf("Processing alpha = %.2f (%d/%d)\n", alpha, a_idx, length(alpha_values)))
-    
-    # Preallocate store for efficiency
-    store <- vector("character", length = nrow(x_new))
-    
-    
-    # Use the parallel version to get all confidence sets at once
-    store <- conf.sets.parallel(
-      x_new = x_new,
-      train.resp = train.resp, 
-      train.data = train.data, 
-      y.grid = y.grid, 
-      beta = theta, 
-      alpha = alpha
-    )
-    
-      
-      # Optional progress indicator 
-
-    
-    # Count empty and full sets
-    empty_count <- sum(store == "{}")
-    full_count <- sum(store == "{0,1}")
-    uninformative_count <- empty_count + full_count
-    
-    # Count single-element predictions and misclassifications
-    single_0_indices <- store == "{0}"
-    single_1_indices <- store == "{1}"
-    single_element_count <- sum(single_0_indices) + sum(single_1_indices)
-    
-    # Calculate misclassifications for single-element predictions
-    misclassifications <- 0
-    
-    # For predictions of {0}, check if true label is 1
-    misclassifications <- misclassifications + sum(single_0_indices & y_true == 1)
-    
-    # For predictions of {1}, check if true label is 0
-    misclassifications <- misclassifications + sum(single_1_indices & y_true == 0)
-    
-    # Store results
-    results$empty_count[a_idx] <- empty_count
-    results$full_count[a_idx] <- full_count
-    results$single_element_count[a_idx] <- single_element_count
-    results$misclassification_count[a_idx] <- misclassifications
-    results$uninformative_rate[a_idx] <- uninformative_count/nrow(x_new)
-    
-    # Calculate misclassification rate (only among single-element predictions)
-    if (single_element_count > 0) {
-      results$misclassification_rate[a_idx] <- misclassifications/single_element_count
-    } else {
-      results$misclassification_rate[a_idx] <- NA
-    }
-    
-    cat("\n")
-  }
-  
-  # Plot only the misclassification rate
-  plot(results$alpha, results$misclassification_rate, type="o", col="purple", 
-       xlab="Alpha", ylab="Misclassification Rate",
-       main="Misclassification Rate (Single-Element Predictions)")
-  grid()
-  
-  return(results)
-}
-```
 
 
 
 ```{r}
-conf_plot_missclassify_rates(train.resp, train.data, y.grid, x_new, y_true=test.resp, theta=beta, 
-                                 alpha_values = seq(0.05, 0.7, by = 0.05))
-```
-
-
-```{r}
-compare_missclassify_rates(train.resp, train.data, y.grid, x_new, y_true=test.resp, theta=beta, 
+beta<-gibbs_sampler(y=splits$train_resp[[2]] , X=splits$train_data[[2]], n_iter = 4000,b_prior=rep(0, 18), B_prior_inv=diag(0.01, 18))
+compare_missclassify_rates(splits$train_resp[[2]],splits$train_data[[2]], y.grid=list(0,1), x_new=splits$test_data[[2]], y_true=splits$test_resp[[2]], theta=t(beta), 
                                  alpha_values = seq(0.05, 0.5, by = 0.05))
+```
+
+```{r}
+compare_class_prediction_counts(splits$train_resp[[2]], splits$train_data[[2]], y.grid=list(0,1), x_new=splits$test_data[[2]], theta=t(beta), 
+                                      alpha_values = seq(0.01, 0.5, by = 0.05))
 ```
 

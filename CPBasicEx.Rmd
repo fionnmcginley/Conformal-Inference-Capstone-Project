@@ -1,0 +1,493 @@
+---
+title: "Conformal Prediction Example"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+```{r}
+library(datasets)
+data(cars)
+str(cars)
+```
+
+```{r}
+#start with split conformal
+#create function that takes in dataset with a single feature and response, both of one variable
+#for a chosen alpha level, function performs split-conformal prediction with training and calibration data split evenly at random.
+lm_split_conformal<-function(data, alpha){
+  pred<-data[,1]
+  resp<-data[,2]
+  
+n<-length(pred)
+if (n!=length(resp)){
+  return("must have balanced data set")
+}
+else if(n==length(pred)){
+  #set seed for consistency
+set.seed(1)
+#randomly sort list 1,2,...,n
+permuted_list<-sample(c(1:n), replace = F)
+#create training data(D_1) and calibration data(D_2)
+d_1<-permuted_list[1:(n/2)]
+d_2<-permuted_list[((n/2)+1):n]
+D_1<-data[d_1,]
+D_2<-data[d_2,]
+#compute cardinality of each
+n_1<-length(D_1[,1])
+n_2<-length(D_2[,1])
+#train model on training set
+  train_pred<-D_1[,1]
+  train_resp<-D_1[,2]
+  model<-lm(formula= train_resp ~ train_pred, data=D_1)
+  #construct point predictor function
+f_hat<-function(x){as.numeric(model$coefficients[1])+x*as.numeric(model$coefficients[2])}
+#get residuals
+R<-abs(D_2[,2]-f_hat(D_2[,1]))
+#compute adjusted quantile level
+k<-ceiling((1-alpha)*(n_2+1))/n_2
+q_hat<-quantile(R, probs = k)
+# Prepare prediction data
+pred_data <- data.frame(pred=seq(min(pred), max(pred), length.out = n*2))
+#put predicted value in second column
+pred_data[,2]<- f_hat(pred_data[,1])
+# Calculate the upper and lower bounds using q_hat
+pred_data$lower_bound <- pred_data[,2] - q_hat
+pred_data$upper_bound <- pred_data[,2] + q_hat
+return(list(pred_data,model$coefficients[1],model$coefficients[2]))
+}
+}
+```
+
+
+```{r}
+full.conformal<- function(data=cars, alpha=0.2){
+  x<-data[,1]
+  y<-data[,2]
+#now do full conformal
+n<-length(data[,1])
+#error level
+xrange<-seq(min(x),max(x), by=.25)
+yrange<-seq(min(y)-3*sd(y),max(y)+3*sd(y), by=.25)
+# Data frame to store prediction intervals
+pred_intervals <- data.frame(speed = rep(NA, length(xrange)), 
+                              lower = rep(NA, length(xrange)), 
+                              upper = rep(NA, length(xrange)))
+
+for (x in xrange){
+    accepted_y <- c()
+  #loop through descritized set of response values(y-range)
+  for (i in 1:length(yrange)){
+    y<-yrange[i]
+  #add test point to data set
+new_row <- c(x,y)
+augmented.cars <- rbind(data, new_row)
+#fit model with added test point
+model<-lm(formula= data[,2] ~ data[,1], data=augmented.cars)
+f_hat<-function(t){as.numeric(model$coefficients[1])+t*as.numeric(model$coefficients[2])} 
+#calculate residuals
+R_i<-abs(data[,2]-f_hat(data[,1]))
+R_test<-abs(y-f_hat(x))
+#compute adjusted quantile level
+k<-ceiling((1-alpha)*(n+1))/n
+q_hat<-quantile(R_i, probs = k)
+if (R_test <= q_hat){
+  accepted_y <- c(accepted_y, y)
+  
+}
+ # Store the lower and upper bounds of the accepted y values
+  if (length(accepted_y) > 0) {
+    pred_intervals[which(xrange == x), ] <- c(x, min(accepted_y), max(accepted_y))
+  } else {
+    pred_intervals[which(xrange == x), ] <- c(x, NA, NA)  # No valid predictions
+  }
+ }
+}
+}
+```
+
+```{r}
+alpha<-0.2
+#timecheck
+system.time(lm_split_conformal(cars, alpha))
+system.time(full.conformal(data=cars, alpha=0.2))
+```
+
+
+```{r}
+# Run the lm_split_conformal function on the cars dataset
+alpha <- 0.2
+pred_data <- lm_split_conformal(cars, alpha)[[1]]
+a<-lm_split_conformal(cars, alpha)[[2]]
+b<-lm_split_conformal(cars, alpha)[[3]]
+
+# Plot the observed data points
+plot(cars$speed, cars$dist, ylim = c(-40, 120), pch = 16, col = "blue",
+     xlab = "Speed", ylab = "Stopping Distance", 
+     main = "Split-Conformal Prediction Bands")
+
+# Add the prediction bands using the polygon function for shading
+polygon(c(pred_data$pred, rev(pred_data$pred)),
+        c(pred_data$upper_bound, rev(pred_data$lower_bound)),
+        col = rgb(1, 0, 0, alpha = 0.2), border = NA)
+
+# Fit and add the regression line
+ lm(dist ~ speed, data = cars)
+abline(a=a, b=b, col = "black", lwd = 2)
+abline(lm(dist ~ speed, data = cars), col="blue")
+
+# Add upper and lower bounds as dotted lines
+lines(pred_data$pred, pred_data$upper_bound, lty = 2, col = "red", lwd = 1.5)
+lines(pred_data$pred, pred_data$lower_bound, lty = 2, col = "red", lwd = 1.5)
+
+```
+```{r}
+mean(abs(pred_data$upper_bound-pred_data$lower_bound))
+```
+
+
+```{r}
+pred_interals<-full.conformal(data=cars, alpha=0.2)
+```
+
+
+
+
+```{r}
+
+# Base R plotting
+plot(cars$speed, cars$dist, pch = 16, col = 'blue', 
+     xlab = "Speed", ylab = "Distance", 
+    main = expression("Full Conformal Prediction Bands"), ylim = c(-40, 120))
+
+# Remove any NA values from pred_intervals
+valid_indices <- which(!is.na(pred_intervals$lower) & !is.na(pred_intervals$upper))
+x_valid <- pred_intervals$speed[valid_indices]
+lower_valid <- pred_intervals$lower[valid_indices]
+upper_valid <- pred_intervals$upper[valid_indices]
+
+# Add shaded confidence region
+polygon(c(x_valid, rev(x_valid)), c(lower_valid, rev(upper_valid)), 
+        col = rgb(1, 0, 0, alpha = 0.2), border = NA)  # Light red shading
+# Fit linear regression model
+lm_model <- lm(dist ~ speed, data = cars)
+
+# Predict distances over the range of speed values
+predicted_dist <- predict(lm_model, newdata = data.frame(speed = x_valid))
+
+# Add dotted lines for lower and upper bounds
+lines(x_valid, lower_valid, col = "red", lty = 2, lwd = 2)  # Dotted lower bound
+lines(x_valid, upper_valid, col = "red", lty = 2, lwd = 2)  # Dotted upper bound
+# Add linear regression line
+lines(x_valid, predicted_dist, col = "black", lwd = 2, lty = 1)
+# Close the device
+#very similar to split conformal in this case, however the choice of x-grid and y-grid affect the bands, here by limiting the lower bound to be greater than/equal to the minimum of the response
+```
+```{r}
+mean(abs(upper_valid-lower_valid))
+```
+
+
+
+```{r}
+#Version using the jackknife+
+#create quantile functions
+q_hat_minus<-function(n,alpha,R){
+    k<-floor((alpha)*(n+1))/n
+  q<-quantile(R, probs = k)
+  return(q)
+}
+q_hat_plus<-function(n,alpha,R){
+  k<-ceiling((1-alpha)*(n+1))/n
+  q<-quantile(R, probs = k)
+  return(q)
+}
+#Create function that trains model without the i-th data point and gives prediction at x
+mu_lessi<-function(data,i,n,x){
+  if(i %in% c(1:n)){
+    loo_data<-data[-i,]
+   model<-lm(formula= dist ~ speed, data=loo_data)
+   mu_hat_x<-as.numeric(model$coefficients[1])+as.numeric(model$coefficients[2])*x
+   mu_hat_x
+  }
+  else{
+    print("i must be in the range of [n]")
+  }
+}
+#create function to calculate leave-one-out residual
+R_Loo<-function(data,i,n){
+  Y<-data[i,2]
+  X<-data[i,1]
+ mu_hat_X<-mu_lessi(data,i,n,X)
+  abs(Y-mu_hat_X)
+}
+```
+
+
+
+```{r}
+#jackknife plus
+jackknife_plus_predict<-function(x,n,alpha,data){
+  Vplus<-rep(NA,n)
+  Vminus<-rep(NA,n)
+  for (i in 1:n){
+Vplus[i]<-(mu_lessi(data,i,n,x)+R_Loo(data,i,n))
+Vminus[i]<-(mu_lessi(data,i,n,x)-R_Loo(data,i,n))
+  }
+  #get quantiles
+upper<-q_hat_plus(n,alpha,Vplus)  
+lower<-q_hat_minus(n,alpha,Vminus) 
+return(c(lower,upper))
+}
+#define xgrid
+xrange<-seq(4,25, by=.25)
+alpha<-0.1
+for (i in 1:length(xrange)) {
+  x <- xrange[i]
+  intervals <- jackknife_plus_predict(x, n, alpha, cars)
+  pred_intervals[i, ] <- c(x, intervals[1], intervals[2])
+}
+```
+
+
+```{r}
+# Plot the results
+plot(cars$speed, cars$dist, pch = 16, col = 'blue', 
+     xlab = "Speed", ylab = "Distance", main = "Jackknife+ Prediction Bands", ylim = c(-40,120))
+
+# Add prediction intervals as polygons
+for (i in 1:nrow(pred_intervals)) {
+  x_val <- pred_intervals$speed[i]
+  lower <- pred_intervals$lower[i]
+  upper <- pred_intervals$upper[i]
+  
+  if (!is.na(lower) && !is.na(upper)) {
+    polygon(c(x_val - 0.5, x_val - 0.5, x_val + 0.5, x_val + 0.5), 
+            c(lower, upper, upper, lower), col = rgb(1, 0, 0, alpha = 0.3), border = NA)
+  }
+}
+```
+
+```{r}
+#compare training costs for the 3 methods
+system.time(lm_split_conformal(cars, 0.1))#split conformal
+system.time(for (i in 1:length(xrange)) {
+  x <- xrange[i]
+  intervals <- jackknife_plus_predict(x, n, alpha, cars)
+  pred_intervals[i, ] <- c(x, intervals[1], intervals[2])
+})#Jackknife+
+system.time(for (x in xrange){
+    accepted_y <- c()
+  #loop through descritized set of response values(y-range)
+  for (i in 1:length(yrange)){
+    y<-yrange[i]
+  #add test point to data set
+new_row <- data.frame(speed = x, dist = y)
+augmented.cars <- rbind(cars, new_row)
+#fit model with added test point
+model<-lm(formula= dist ~ speed, data=augmented.cars)
+f_hat<-function(t){as.numeric(model$coefficients[1])+t*as.numeric(model$coefficients[2])} 
+#calculate residuals
+R_i<-abs(cars$dist-f_hat(cars$speed))
+R_test<-abs(y-f_hat(x))
+#compute adjusted quantile level
+k<-ceiling((1-alpha)*(n+1))/n
+q_hat<-quantile(R_i, probs = k)
+if (R_test <= q_hat){
+  accepted_y <- c(accepted_y, y)
+  
+}
+ # Store the lower and upper bounds of the accepted y values
+  if (length(accepted_y) > 0) {
+    pred_intervals[which(xrange == x), ] <- c(x, min(accepted_y), max(accepted_y))
+  } else {
+    pred_intervals[which(xrange == x), ] <- c(x, NA, NA)  # No valid predictions
+  }
+ }
+})#full conformal
+```
+
+
+```{r}
+# Set a random seed 
+set.seed(42)
+
+# Parameters
+n <- 100  # Number of data points
+X <- seq(0, 10, length.out = n)  # Independent variable
+
+# Create a true relationship with some noise
+true_slope <- 2
+true_intercept <- 5
+
+# Generate heteroskedastic noise
+# The noise increases with X
+noise <- rnorm(n, mean = 0, sd = 1 * X)  
+
+# Generate the dependent variable Y
+Y <- true_intercept + true_slope * X + noise
+var_data<-data.frame(X,Y)
+# Plotting the data
+plot(X, Y, pch = 19, col = "blue", main = "Heteroskedastic Data",
+     xlab = "X", ylab = "Y")
+abline(true_intercept, true_slope, col = "red", lwd = 2)  # Add true relationship line
+grid()
+```
+```{r}
+alpha<-0.1
+data<-var_data
+  x<-data[,1]
+  y<-data[,2]
+#now do full conformal
+n<-length(data[,1])
+#error level
+xrange<-seq(min(x),max(x), by=.25)
+yrange<-seq(min(y)-3*sd(y),max(y)+3*sd(y), by=.25)
+# Data frame to store prediction intervals
+pred_intervals <- data.frame(speed = rep(NA, length(xrange)), 
+                              lower = rep(NA, length(xrange)), 
+                              upper = rep(NA, length(xrange)))
+
+for (x in xrange){
+    accepted_y <- c()
+  #loop through descritized set of response values(y-range)
+  for (i in 1:length(yrange)){
+    y<-yrange[i]
+  #add test point to data set
+new_row <- c(x,y)
+augmented.cars <- rbind(data, new_row)
+#fit model with added test point
+model<-lm(formula= data[,2] ~ data[,1], data=augmented.cars)
+f_hat<-function(t){as.numeric(model$coefficients[1])+t*as.numeric(model$coefficients[2])} 
+#calculate residuals
+R_i<-abs(data[,2]-f_hat(data[,1]))
+R_test<-abs(y-f_hat(x))
+#compute adjusted quantile level
+k<-ceiling((1-alpha)*(n+1))/n
+q_hat<-quantile(R_i, probs = k)
+if (R_test <= q_hat){
+  accepted_y <- c(accepted_y, y)
+  
+}
+ # Store the lower and upper bounds of the accepted y values
+  if (length(accepted_y) > 0) {
+    pred_intervals[which(xrange == x), ] <- c(x, min(accepted_y), max(accepted_y))
+  } else {
+    pred_intervals[which(xrange == x), ] <- c(x, NA, NA)  # No valid predictions
+  }
+  }
+}
+```
+
+
+
+
+```{r}
+# plot heteroskedastic data w/ full confomal
+plot(X, Y, pch = 16, col = 'blue', 
+     xlab = "X", ylab = "Y", 
+    main = expression("Full Conformal Prediction Bands"), ylim = c(0, 40))
+
+# Remove any NA values from pred_intervals
+valid_indices <- which(!is.na(pred_intervals$lower) & !is.na(pred_intervals$upper))
+x_valid <- pred_intervals$speed[valid_indices]
+lower_valid <- pred_intervals$lower[valid_indices]
+upper_valid <- pred_intervals$upper[valid_indices]
+
+# Add shaded confidence region
+polygon(c(x_valid, rev(x_valid)), c(lower_valid, rev(upper_valid)), 
+        col = rgb(1, 0, 0, alpha = 0.2), border = NA)  # Light red shading
+# Fit linear regression model
+
+# Predict distances over the range of speed values
+
+# Add dotted lines for lower and upper bounds
+lines(x_valid, lower_valid, col = "red", lty = 2, lwd = 2)  # Dotted lower bound
+lines(x_valid, upper_valid, col = "red", lty = 2, lwd = 2)  # Dotted upper bound
+# Add linear regression line
+
+```
+
+
+
+
+
+
+```{r}
+# Function for Conformal Prediction with Locally Weighted Residuals
+conformal_prediction <- function(data, alpha = 0.2, bandwidth = 2) {
+  
+  # Extract predictor (X) and response (Y)
+  X <- data[,1]
+  Y <- data[,2]
+  
+  # Define prediction range (X values)
+  xrange <- seq(min(X), max(X), by = 0.25)
+  
+  # Define response range (Y values)
+  yrange <- seq(min(Y) - sd(Y), max(Y) + sd(Y), by = 0.25)
+  
+  n <- nrow(data)  # Number of training samples
+  
+  # Data frame to store prediction intervals
+  pred_intervals <- data.frame(x = rep(NA, length(xrange)), 
+                               lower = rep(NA, length(xrange)), 
+                               upper = rep(NA, length(xrange)))
+  
+  # Function to compute locally weighted MAD
+  compute_local_mad <- function(x, residuals, X, bandwidth) {
+    nearby_indices <- which(abs(X - x) <= bandwidth)  # Find nearby points
+    if (length(nearby_indices) < 2) { return(median(abs(residuals - median(residuals)))) }  # Global MAD if too few points
+    local_residuals <- residuals[nearby_indices]
+    return(median(abs(local_residuals - median(local_residuals))))  # Compute local MAD
+  }
+  
+  for (x in xrange) {
+    accepted_y <- c()
+    
+    for (y in yrange) {
+      # Add test point to dataset
+      new_row <- data.frame(X = x, Y = y)
+      augmented_data <- rbind(data, new_row)
+      
+      # Fit model with test point
+      model <- lm(Y ~ X, data = augmented_data)
+      f_hat <- function(t) { as.numeric(model$coefficients[1]) + t * as.numeric(model$coefficients[2]) }
+      
+      # Compute residuals
+      residuals <- abs(Y - f_hat(X))
+      
+      # Compute local MAD estimate ρ(x)
+      rho_x <- compute_local_mad(x, residuals, X, bandwidth)
+      if (rho_x == 0) rho_x <- 1  # Prevent division by zero
+      
+      # Compute locally weighted residuals
+      R_i <- residuals / rho_x
+      R_test <- abs(y - f_hat(x)) / rho_x
+      
+      # Compute adjusted quantile level
+      k <- ceiling((1 - alpha) * (n + 1)) / n
+      q_hat <- quantile(R_i, probs = k, na.rm = TRUE)  # Compute quantile of weighted residuals
+      
+      if (R_test <= q_hat) {
+        accepted_y <- c(accepted_y, y)
+      }
+    }
+    
+    # Store the lower and upper bounds of accepted y values
+    if (length(accepted_y) > 0) {
+      pred_intervals[which(xrange == x), ] <- c(x, min(accepted_y), max(accepted_y))
+    } else {
+      pred_intervals[which(xrange == x), ] <- c(x, NA, NA)
+    }
+  }
+  
+  return(pred_intervals)
+}
+```
+
+
+
+
+
