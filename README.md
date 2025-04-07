@@ -6,16 +6,16 @@ This project explores various conformal prediction methods and their application
 ## Repository Contents
 
 - **R Notebooks**:
-  - `AOI_IS_example.Rmd`: Demonstrates the use of conformal inference in the context of importance sampling on simulated data (Experiment#1).
-  - `CPBasicEx.Rmd`: Provides a general example of applying conformal prediction methods: Split, Full, and Jackknife+.
-  - `FraminghamCaseStudy.Rmd`: Applies conformal prediction techniques to the Framingham dataset for cardiovascular risk assessment(Experiment#2).
+  - `CPBasicEx.Rmd`: Provides a general example of applying the basic conformal prediction methods: Split, Full, and Jackknife+.
+  - `AOI_IS_example.Rmd`: Demonstrates the use of Conformal Bayes using Add one in Importance sampling on simulated data (Experiment#1).
+  - `FraminghamCaseStudy.Rmd`: Applies conformal Bayes to the Framingham dataset for classification(Experiment#2).
 
 - **PDFs**:
   - `AOI_IS_example.pdf`: Knitted version of the `AOI_IS_example.Rmd` notebook.
 
 - **R Utility Scripts**:
   - `AOI.classification.utils.R`: Contains utility functions to support the analyses in `FraminghamCaseStudy.Rmd`.
-  - `AOI.IS.utils.R`: Contains utility functions to support the analyses in the notebooks `AOI_IS_example.Rmd`.
+  - `AOI.IS.utils.R`: Contains utility functions to support the analyses in `AOI_IS_example.Rmd`.
 
 ## Getting Started
 
