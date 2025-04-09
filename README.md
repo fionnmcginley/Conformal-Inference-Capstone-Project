@@ -1,6 +1,6 @@
-# Conformal Inference Capstone Project
+# Bayesian Conformal Prediction Capstone Project
 
-This repository contains R notebooks and associated materials developed for my final year project on **conformal inference**. 
+This repository contains R notebooks and associated materials developed for my final year project on **conformal prediction**. 
 This project explores various conformal prediction methods and their applications to Bayesian models.
 
 ## Repository Contents
